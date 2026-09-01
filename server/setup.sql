@@ -34,13 +34,19 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 -- One row per chat message turn (user or assistant).
+-- user_id scopes each message to the student who sent/received it —
+-- documents are a shared library, but chat history is private per student.
 CREATE TABLE IF NOT EXISTS messages (
     id         SERIAL PRIMARY KEY,
     doc_id     INTEGER NOT NULL REFERENCES documents_meta(id),
+    user_id    UUID NOT NULL REFERENCES auth.users(id),
     role       TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content    TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT NOW()
 );
+
+-- Speeds up the common lookup: "this student's history for this document".
+CREATE INDEX IF NOT EXISTS messages_doc_user_idx ON messages (doc_id, user_id);
 
 -- IVFFlat index for fast similarity search at scale.
 -- Only add this once you have at least 1000 rows — on small datasets it

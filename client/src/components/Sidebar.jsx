@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export default function Sidebar({ docs, activeDocId, onNewChat, onSelectDoc, onDeleteDoc, dark, onToggleDark, open }) {
+export default function Sidebar({ docs, activeDocId, onNewChat, onSelectDoc, onDeleteDoc, dark, onToggleDark, open, userEmail, onSignOut }) {
   const [confirmId, setConfirmId] = useState(null)
 
   function handleDelete(e, id) {
@@ -68,7 +68,7 @@ export default function Sidebar({ docs, activeDocId, onNewChat, onSelectDoc, onD
       <div className="flex-1 overflow-y-auto px-3 pb-4 min-h-0">
         {docs.length > 0 && (
           <p className="text-white/30 text-[10px] font-semibold uppercase tracking-wider px-2 pt-3 pb-1.5">
-            Documents
+            Shared Library
           </p>
         )}
         <div className="space-y-0.5">
@@ -128,10 +128,27 @@ export default function Sidebar({ docs, activeDocId, onNewChat, onSelectDoc, onD
 
         {docs.length === 0 && (
           <p className="text-white/25 text-xs px-2 pt-4">
-            No documents yet — upload a PDF to get started.
+            The library is empty — upload a PDF to share it with everyone.
           </p>
         )}
       </div>
+
+      {/* Account footer */}
+      {userEmail && (
+        <div className="px-3 py-3 border-t border-white/10 flex-shrink-0">
+          <div className="flex items-center justify-between gap-2 px-2">
+            <span className="text-xs text-white/50 truncate" title={userEmail}>
+              {userEmail}
+            </span>
+            <button
+              onClick={onSignOut}
+              className="flex-shrink-0 text-xs font-medium text-white/50 hover:text-brand-gold transition-colors"
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      )}
     </aside>
   )
 }

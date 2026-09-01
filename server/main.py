@@ -2,16 +2,15 @@
 # main.py — FastAPI server
 # ============================================================
 
-import asyncio
 import os
-from contextlib import asynccontextmanager
 
 import anthropic
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from auth import get_current_user
 from chunker import chunk_text
 from db import get_conn
 from embedder import embed_chunks
@@ -19,11 +18,6 @@ from history import get_history, save_message, touch_document
 from parse_pdf import parse_pdf
 from query import query_similar
 from store import create_document, store_chunks
-
-# ── Config ────────────────────────────────────────────────────────────
-# Change this one value to adjust how long data is kept before deletion.
-# 3 = three days, 7 = one week, 30 = one month
-EXPIRY_DAYS = 3
 
 # Load API keys from .env for local development
 # In production (Railway) env vars are injected directly — no .env file needed
@@ -40,42 +34,7 @@ if os.path.exists(env_path):
 client = anthropic.AsyncAnthropic()
 
 
-# ── Auto-expiry background task ───────────────────────────────────────
-async def cleanup_loop():
-    while True:
-        await asyncio.sleep(3600)  # run every hour
-        conn = get_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                f"DELETE FROM messages WHERE created_at < NOW() - INTERVAL '{EXPIRY_DAYS} days'"
-            )
-            cur.execute(
-                f"""
-                DELETE FROM documents
-                WHERE doc_id IN (
-                    SELECT id FROM documents_meta
-                    WHERE last_accessed_at < NOW() - INTERVAL '{EXPIRY_DAYS} days'
-                )
-                """
-            )
-            cur.execute(
-                f"DELETE FROM documents_meta WHERE last_accessed_at < NOW() - INTERVAL '{EXPIRY_DAYS} days'"
-            )
-            conn.commit()
-            print(f"Cleanup: removed data older than {EXPIRY_DAYS} days.")
-        finally:
-            conn.close()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    task = asyncio.create_task(cleanup_loop())
-    yield
-    task.cancel()
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 ALLOWED_ORIGINS = [
     "http://localhost:5173",                          # local dev
@@ -113,9 +72,9 @@ SYSTEM_PROMPT_DEBATE = (
 
 
 # ── Streaming generator for /chat ─────────────────────────────────────
-async def stream_chat(message: str, doc_id: int, debate_mode: bool = False):
+async def stream_chat(message: str, doc_id: int, user_id: str, debate_mode: bool = False):
     touch_document(doc_id)
-    history = get_history(doc_id, limit=6)
+    history = get_history(doc_id, user_id, limit=6)
     chunks = query_similar(message, top_k=12, doc_id=doc_id)
     context = "\n\n".join(chunks)
 
@@ -133,28 +92,31 @@ async def stream_chat(message: str, doc_id: int, debate_mode: bool = False):
             full_reply.append(text)
             yield f"data: {text}\n\n"
 
-    save_message(doc_id, "user", message)
-    save_message(doc_id, "assistant", "".join(full_reply))
+    save_message(doc_id, user_id, "user", message)
+    save_message(doc_id, user_id, "assistant", "".join(full_reply))
     yield "data: [DONE]\n\n"
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────
+# Every route below requires a valid @williams.edu Supabase session
+# (see auth.py) — there is no anonymous/public use of this API.
+
 @app.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     return StreamingResponse(
-        stream_chat(req.message, req.doc_id, req.debate_mode),
+        stream_chat(req.message, req.doc_id, user["id"], req.debate_mode),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
 
 
 @app.get("/history")
-async def history(doc_id: int):
-    return get_history(doc_id)
+async def history(doc_id: int, user: dict = Depends(get_current_user)):
+    return get_history(doc_id, user["id"])
 
 
 @app.get("/documents")
-def list_documents():
+def list_documents(user: dict = Depends(get_current_user)):
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -175,7 +137,7 @@ def list_documents():
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
@@ -211,7 +173,7 @@ async def upload(file: UploadFile = File(...)):
 
 
 @app.delete("/documents/{doc_id}")
-def delete_document(doc_id: int):
+def delete_document(doc_id: int, user: dict = Depends(get_current_user)):
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -222,30 +184,3 @@ def delete_document(doc_id: int):
         return {"status": "deleted"}
     finally:
         conn.close()
-
-
-# Kept for debugging — unscoped search across all documents
-@app.get("/ask")
-async def ask(prompt: str):
-    async def stream_ask():
-        chunks = query_similar(prompt, top_k=5)
-        context = "\n\n".join(chunks)
-        async with client.messages.stream(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system=(
-                "Answer the user's question directly using only the information below. "
-                "Do not say 'based on the context' or similar phrases — just answer. "
-                f"If the answer is not present, say so in one sentence.\n\n{context}"
-            ),
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
-            async for text in stream.text_stream:
-                yield f"data: {text}\n\n"
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(
-        stream_ask(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
-    )

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { apiFetch } from '../lib/api'
 
 const SUGGESTIONS = [
   'Summarise this document in 3 bullet points',
@@ -18,7 +19,7 @@ export default function ChatWindow({ docId, filename }) {
   const textareaRef = useRef(null)
 
   useEffect(() => {
-    fetch(`/api/history?doc_id=${docId}`)
+    apiFetch(`/api/history?doc_id=${docId}`)
       .then(r => r.json())
       .then(setMessages)
       .catch(() => {})
@@ -44,7 +45,7 @@ export default function ChatWindow({ docId, filename }) {
     setStreaming(true)
 
     try {
-      const res = await fetch('/api/chat', {
+      const res = await apiFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, doc_id: docId, debate_mode: debateMode }),

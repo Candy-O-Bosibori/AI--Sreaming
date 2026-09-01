@@ -17,6 +17,7 @@ openai==2.33.0
 packaging==26.2
 pluggy==1.6.0
 psycopg2-binary==2.9.12
+PyJWT==2.10.1
 pydantic==2.13.3
 pydantic_core==2.46.3
 Pygments==2.20.0

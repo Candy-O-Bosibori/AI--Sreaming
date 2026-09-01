@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react'
+import { apiFetch } from '../lib/api'
 
 export default function UploadPage({ onUpload }) {
   const [dragging, setDragging] = useState(false)
@@ -20,7 +21,7 @@ export default function UploadPage({ onUpload }) {
     try {
       const form = new FormData()
       form.append('file', file)
-      const res = await fetch('/api/upload', { method: 'POST', body: form })
+      const res = await apiFetch('/api/upload', { method: 'POST', body: form })
       const data = await res.json()
 
       if (res.status === 409) {

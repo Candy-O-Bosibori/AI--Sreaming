@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react'
 import Sidebar from './components/Sidebar'
 import UploadPage from './components/UploadPage'
 import ChatWindow from './components/ChatWindow'
+import Login from './components/Login'
+import { supabase } from './lib/supabase'
+import { apiFetch } from './lib/api'
 
 function useDarkMode() {
   const [dark, setDark] = useState(() => localStorage.getItem('darkMode') === 'true')
@@ -12,10 +15,49 @@ function useDarkMode() {
   return [dark, setDark]
 }
 
+const REQUIRED_EMAIL_DOMAIN = '@williams.edu'
+
 export default function App() {
   const [dark, setDark] = useDarkMode()
   const [docs, setDocs] = useState([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  // ── Auth state ────────────────────────────────────────────────────
+  // authChecked distinguishes "still checking for an existing session"
+  // from "checked, and there isn't one" so we don't flash the login
+  // screen before Supabase has had a chance to restore a session.
+  const [session, setSession] = useState(null)
+  const [authChecked, setAuthChecked] = useState(false)
+  const [accessDenied, setAccessDenied] = useState(false)
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session)
+      setAuthChecked(true)
+    })
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+      setAuthChecked(true)
+    })
+
+    return () => listener.subscription.unsubscribe()
+  }, [])
+
+  // Defense-in-depth: the backend already rejects non-@williams.edu tokens
+  // (see server/auth.py), but checking here too means a non-Williams user
+  // never even sees the app shell flash before being signed back out.
+  useEffect(() => {
+    const email = session?.user?.email || ''
+    if (session && !email.toLowerCase().endsWith(REQUIRED_EMAIL_DOMAIN)) {
+      setAccessDenied(true)
+      supabase.auth.signOut()
+    }
+  }, [session])
+
+  function signOut() {
+    supabase.auth.signOut()
+  }
 
   const [docId, setDocId] = useState(() => {
     const saved = localStorage.getItem('docId')
@@ -29,13 +71,15 @@ export default function App() {
   )
 
   function refreshDocs() {
-    fetch('/api/documents')
+    apiFetch('/api/documents')
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)))
       .then(docs => Array.isArray(docs) ? setDocs(docs) : setDocs([]))
       .catch(() => setDocs([]))
   }
 
-  useEffect(() => { refreshDocs() }, [])
+  useEffect(() => {
+    if (session) refreshDocs()
+  }, [session])
 
   function openDoc(id, name) {
     setDocId(id)
@@ -66,7 +110,7 @@ export default function App() {
   }
 
   async function deleteDoc(id) {
-    await fetch(`/api/documents/${id}`, { method: 'DELETE' })
+    await apiFetch(`/api/documents/${id}`, { method: 'DELETE' })
     refreshDocs()
     if (id === docId) {
       setDocId(null)
@@ -75,6 +119,18 @@ export default function App() {
       localStorage.removeItem('docId')
       localStorage.removeItem('docFilename')
     }
+  }
+
+  if (!authChecked) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-white dark:bg-brand-dark-bg">
+        <span className="w-8 h-8 border-[3px] border-brand-purple/30 border-t-brand-purple rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  if (!session) {
+    return <Login accessDenied={accessDenied} />
   }
 
   return (
@@ -96,6 +152,8 @@ export default function App() {
         dark={dark}
         onToggleDark={() => setDark(d => !d)}
         open={sidebarOpen}
+        userEmail={session.user?.email}
+        onSignOut={signOut}
       />
 
       {/* Main area */}

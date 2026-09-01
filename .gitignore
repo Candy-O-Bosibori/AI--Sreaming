@@ -1,6 +1,7 @@
 # Secret keys — never commit these
 .env
 server/.env
+client/.env
 
 # Python cache files
 __pycache__/
@@ -17,5 +18,12 @@ client/node_modules/
 
 # OS
 .DS_Store
-DEPLOYMENT.md 
+DEPLOYMENT.md
 
+# Playwright
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
