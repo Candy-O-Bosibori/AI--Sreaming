@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth import get_current_user
-from chunker import chunk_text
+from chunker import chunk_smart
 from db import get_conn
 from embedder import embed_chunks
 from history import get_history, save_message, touch_document
@@ -165,7 +165,7 @@ async def upload(file: UploadFile = File(...), user: dict = Depends(get_current_
         raise HTTPException(status_code=422, detail="No extractable text found in PDF.")
 
     doc_id = create_document(file.filename)
-    chunks = chunk_text(text, chunk_size=500, overlap=50)
+    chunks = chunk_smart(text, chunk_size=500, overlap=50)
     vectors = embed_chunks(chunks)
     store_chunks(chunks, vectors, doc_id)
 
