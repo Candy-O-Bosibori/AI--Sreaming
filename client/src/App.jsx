@@ -73,7 +73,27 @@ export default function App() {
   function refreshDocs() {
     apiFetch('/api/documents')
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)))
-      .then(docs => Array.isArray(docs) ? setDocs(docs) : setDocs([]))
+      .then(fetchedDocs => {
+        const docs = Array.isArray(fetchedDocs) ? fetchedDocs : []
+        setDocs(docs)
+
+        // The currently-selected doc (restored from localStorage on load,
+        // or selected earlier this session) may no longer exist — it
+        // could have been deleted, or the database reset. Without this
+        // check the chat view would keep rendering for a doc_id that
+        // doesn't back anything real, and every question would silently
+        // retrieve zero context.
+        setDocId(currentId => {
+          if (currentId != null && !docs.some(d => d.id === currentId)) {
+            localStorage.removeItem('docId')
+            localStorage.removeItem('docFilename')
+            setFilename('')
+            setView('upload')
+            return null
+          }
+          return currentId
+        })
+      })
       .catch(() => setDocs([]))
   }
 

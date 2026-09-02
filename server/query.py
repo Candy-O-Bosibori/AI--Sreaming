@@ -52,7 +52,6 @@ def query_similar(question: str, top_k: int = 5, doc_id: Optional[int] = None) -
             )
         else:
             # Unscoped search: compare against every chunk in the database.
-            # Used by the legacy /ask endpoint (Phase 1).
             cur.execute(
                 """
                 SELECT content
@@ -70,6 +69,44 @@ def query_similar(question: str, top_k: int = 5, doc_id: Optional[int] = None) -
         conn.close()
 
     return results
+
+
+def get_all_chunks(doc_id: int, limit: int = 40) -> List[str]:
+    """
+    Fetch up to `limit` chunks for a document, in original document order
+    — not ranked by similarity to any question. Used for tasks that need
+    broad coverage of the whole document (summaries, discussion questions)
+    rather than chunks relevant to a specific query.
+
+    Why not query_similar() for this: similarity search needs a question
+    to embed and compare against, and "summarize this document" isn't
+    reliably close in embedding-space to the chunks that actually cover
+    the document's full range of topics — it tends to cluster around
+    whatever's most central, missing entire sections. Pulling chunks in
+    document order instead guarantees real coverage.
+
+    Args:
+        doc_id: The document to fetch chunks for.
+        limit:  Max chunks to return (default 40 — comfortably covers a
+                typical ~20-page course PDF within Claude's context window
+                at low cost; a longer document is truncated, not sampled,
+                which is an accepted tradeoff for now).
+
+    Returns:
+        A list of chunk text strings, in the same order they were
+        originally stored (which matches document reading order — see
+        store.py's store_chunks()).
+    """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT content FROM documents WHERE doc_id = %s ORDER BY id LIMIT %s",
+            (doc_id, limit),
+        )
+        return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
 
 
 # ── Quick test ────────────────────────────────────────────────────────

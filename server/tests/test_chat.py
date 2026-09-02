@@ -1,12 +1,42 @@
 import contextlib
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
+import auth as auth_module
 from auth import REQUIRED_EMAIL_DOMAIN, get_current_user
 from main import app
+
+# A real EC key pair, generated once for the whole test run. This never
+# touches Supabase or the network — it's used to sign fake tokens the
+# same way Supabase's real ES256 keys would, and to stand in for the
+# public key our real JWKS fetch would normally return.
+_TEST_PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
+_TEST_PUBLIC_KEY = _TEST_PRIVATE_KEY.public_key()
+
+
+def _make_token(email: str, sub: str = "abc-123") -> str:
+    return jwt.encode(
+        {"sub": sub, "email": email, "aud": "authenticated"},
+        _TEST_PRIVATE_KEY,
+        algorithm="ES256",
+    )
+
+
+@contextlib.contextmanager
+def _mock_jwks():
+    """Stand in for auth.py's real JWKS fetch (which calls Supabase's
+    servers) with our local test public key, so these tests never need
+    network access or a live Supabase project."""
+    fake_signing_key = MagicMock()
+    fake_signing_key.key = _TEST_PUBLIC_KEY
+    fake_client = MagicMock()
+    fake_client.get_signing_key_from_jwt.return_value = fake_signing_key
+    with patch.object(auth_module, "_get_jwks_client", return_value=fake_client):
+        yield
 
 FAKE_USER = {"id": "00000000-0000-0000-0000-000000000001", "email": "student@williams.edu"}
 
@@ -55,35 +85,25 @@ def test_history_requires_authorization_header():
     assert resp.status_code in (401, 422)
 
 
-def test_get_current_user_rejects_non_williams_email(monkeypatch):
-    # Unit test of the auth dependency itself — no TestClient/live DB needed.
-    # auth.py reads SUPABASE_JWT_SECRET from the environment lazily (per
-    # request), so patching os.environ is what actually takes effect here.
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    fake_token = jwt.encode(
-        {"sub": "abc-123", "email": "student@gmail.com", "aud": "authenticated"},
-        "test-secret",
-        algorithm="HS256",
-    )
-    with pytest.raises(Exception) as exc_info:
-        get_current_user(authorization=f"Bearer {fake_token}")
+def test_get_current_user_rejects_non_williams_email():
+    # Unit test of the auth dependency itself — no TestClient/live DB or
+    # real network call to Supabase's JWKS endpoint needed (see _mock_jwks).
+    fake_token = _make_token(email="student@gmail.com")
+    with _mock_jwks():
+        with pytest.raises(Exception) as exc_info:
+            get_current_user(authorization=f"Bearer {fake_token}")
     assert getattr(exc_info.value, "status_code", None) == 403
 
 
-def test_get_current_user_accepts_williams_email(monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    fake_token = jwt.encode(
-        {"sub": "abc-123", "email": "student@williams.edu", "aud": "authenticated"},
-        "test-secret",
-        algorithm="HS256",
-    )
-    user = get_current_user(authorization=f"Bearer {fake_token}")
+def test_get_current_user_accepts_williams_email():
+    fake_token = _make_token(email="student@williams.edu")
+    with _mock_jwks():
+        user = get_current_user(authorization=f"Bearer {fake_token}")
     assert user["email"].endswith(REQUIRED_EMAIL_DOMAIN)
     assert user["id"] == "abc-123"
 
 
-def test_get_current_user_rejects_malformed_header(monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+def test_get_current_user_rejects_malformed_header():
     with pytest.raises(Exception):
         get_current_user(authorization="not-a-bearer-token")
 

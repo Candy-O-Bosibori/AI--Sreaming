@@ -20,7 +20,7 @@ export default function Login({ accessDenied }) {
   }
 
   return (
-    <div className="h-full bg-white dark:bg-brand-dark-bg flex items-center justify-center p-6">
+    <div className="h-screen bg-white dark:bg-brand-dark-bg flex items-center justify-center p-6">
       <div className="w-full max-w-sm">
         <div className="bg-white dark:bg-brand-dark-card rounded-2xl shadow-purple-md p-8 border border-purple-100 dark:border-brand-purple text-center">
           <h1 className="text-2xl font-bold text-brand-purple dark:text-brand-gold mb-1">
@@ -45,7 +45,7 @@ export default function Login({ accessDenied }) {
             className="w-full flex items-center justify-center gap-3 bg-white dark:bg-white/5 border border-gray-300 dark:border-white/20 hover:bg-gray-50 dark:hover:bg-white/10 text-gray-700 dark:text-gray-200 font-medium py-3 px-6 rounded-full transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {loading ? (
-              <span className="w-5 h-5 border-2 border-gray-300 border-t-brand-purple rounded-full animate-spin" />
+              <span className="w-5 h-5 border-2 border-brand-purple/30 border-t-brand-purple rounded-full animate-spin" />
             ) : (
               <svg className="w-5 h-5" viewBox="0 0 24 24">
                 <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
@@ -58,10 +58,10 @@ export default function Login({ accessDenied }) {
           </button>
 
           {error && (
-            <p className="mt-4 text-sm text-red-500">{error}</p>
+            <p className="mt-4 text-sm text-red-600 dark:text-red-400">{error}</p>
           )}
 
-          <p className="mt-6 text-xs text-gray-400">
+          <p className="mt-6 text-xs text-gray-400 dark:text-gray-500">
             Access is restricted to @williams.edu accounts.
           </p>
         </div>

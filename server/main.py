@@ -3,6 +3,7 @@
 # ============================================================
 
 import os
+import re
 
 import anthropic
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -16,7 +17,13 @@ from db import get_conn
 from embedder import embed_chunks
 from history import get_history, save_message, touch_document
 from parse_pdf import parse_pdf
-from query import query_similar
+from prompts import (
+    SYSTEM_PROMPT_DEBATE,
+    SYSTEM_PROMPT_DEFAULT,
+    SYSTEM_PROMPT_DISCUSSION_QUESTIONS,
+    SYSTEM_PROMPT_SUMMARY,
+)
+from query import get_all_chunks, query_similar
 from store import create_document, store_chunks
 
 # Load API keys from .env for local development
@@ -54,21 +61,6 @@ class ChatRequest(BaseModel):
     message: str
     doc_id: int
     debate_mode: bool = False
-
-
-SYSTEM_PROMPT_DEFAULT = (
-    "Answer the user's question directly using only the information below. "
-    "Do not say 'based on the context' or similar phrases — just answer. "
-    "If the answer is not present, say so in one sentence."
-)
-
-SYSTEM_PROMPT_DEBATE = (
-    "You will be given a document and a question. "
-    "For any argument, claim, or position in the document relevant to the question, "
-    "steelman BOTH the supporting and opposing positions with equal rigour. "
-    "Present each side fairly before giving your own conclusion. "
-    "Use only the information below — do not introduce outside knowledge."
-)
 
 
 # ── Streaming generator for /chat ─────────────────────────────────────
@@ -184,3 +176,71 @@ def delete_document(doc_id: int, user: dict = Depends(get_current_user)):
         return {"status": "deleted"}
     finally:
         conn.close()
+
+
+def _require_document_exists(doc_id: int) -> None:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM documents_meta WHERE id = %s", (doc_id,))
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Document not found.")
+    finally:
+        conn.close()
+
+
+# Splits Claude's numbered-list output ("1. Question one\n2. Question two")
+# into a clean array. Claude sometimes prepends a markdown heading (e.g.
+# "# Discussion Questions") despite the prompt asking for only the list —
+# _LIST_ITEM_MARKER distinguishes a real list entry (has a number/bullet
+# prefix) from stray text, and lines without a marker are only kept if
+# they end in "?", since these are specifically meant to be questions.
+_LIST_ITEM_MARKER = re.compile(r"^\s*(\d+[.)]|[-*•])\s*")
+
+
+def _parse_numbered_list(text: str) -> list[str]:
+    items = []
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        match = _LIST_ITEM_MARKER.match(line)
+        if match:
+            items.append(line[match.end():].strip())
+        elif line.endswith("?"):
+            items.append(line)
+    return items
+
+
+@app.post("/documents/{doc_id}/summary")
+async def summarize_document(doc_id: int, user: dict = Depends(get_current_user)):
+    _require_document_exists(doc_id)
+    chunks = get_all_chunks(doc_id, limit=40)
+    if not chunks:
+        raise HTTPException(status_code=422, detail="Document has no content to summarize.")
+    context = "\n\n".join(chunks)
+
+    response = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        system=f"{SYSTEM_PROMPT_SUMMARY}\n\n{context}",
+        messages=[{"role": "user", "content": "Summarize this document."}],
+    )
+    return {"summary": response.content[0].text}
+
+
+@app.post("/documents/{doc_id}/discussion-questions")
+async def generate_discussion_questions(doc_id: int, user: dict = Depends(get_current_user)):
+    _require_document_exists(doc_id)
+    chunks = get_all_chunks(doc_id, limit=40)
+    if not chunks:
+        raise HTTPException(status_code=422, detail="Document has no content to generate questions from.")
+    context = "\n\n".join(chunks)
+
+    response = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        system=f"{SYSTEM_PROMPT_DISCUSSION_QUESTIONS}\n\n{context}",
+        messages=[{"role": "user", "content": "Generate discussion questions for this document."}],
+    )
+    return {"questions": _parse_numbered_list(response.content[0].text)}

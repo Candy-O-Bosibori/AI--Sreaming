@@ -11,10 +11,14 @@
 #   returns a JWT -> frontend sends it as `Authorization: Bearer <jwt>`
 #   on every API call -> this file verifies it on the way in.
 #
-# Why HS256 + a shared secret (not JWKS/asymmetric keys):
-#   Supabase projects still support a single "legacy JWT secret" for
-#   HS256 verification. It's simpler than fetching/caching a JWKS
-#   endpoint and is entirely sufficient at this app's scale.
+# Why ES256 + a JWKS endpoint (not a shared HS256 secret):
+#   Supabase projects created with the newer "JWT Signing Keys" feature
+#   sign tokens asymmetrically (ES256) rather than with a single shared
+#   secret. We verify by fetching Supabase's PUBLIC key from its JWKS
+#   endpoint — nobody but Supabase can forge a valid signature, since
+#   only Supabase holds the private key. PyJWKClient caches the fetched
+#   key set in-process (default 5 minutes) so this doesn't mean a
+#   network call on every request — see SUPABASE_JWKS_CLIENT below.
 # ============================================================
 
 import os
@@ -23,6 +27,22 @@ import jwt
 from fastapi import Header, HTTPException
 
 REQUIRED_EMAIL_DOMAIN = "@williams.edu"
+
+# Built once at import time and reused across requests — PyJWKClient
+# caches the fetched key set internally, so most requests verify the
+# token signature locally with no network call at all.
+_jwks_client = None
+
+
+def _get_jwks_client() -> jwt.PyJWKClient:
+    global _jwks_client
+    if _jwks_client is None:
+        supabase_url = os.environ.get("SUPABASE_URL")
+        if not supabase_url:
+            raise HTTPException(status_code=500, detail="Server auth is not configured.")
+        jwks_url = f"{supabase_url}/auth/v1/.well-known/jwks.json"
+        _jwks_client = jwt.PyJWKClient(jwks_url, cache_jwk_set=True, cache_keys=True)
+    return _jwks_client
 
 
 def get_current_user(authorization: str = Header(...)) -> dict:
@@ -46,27 +66,21 @@ def get_current_user(authorization: str = Header(...)) -> dict:
         HTTPException(403): token is valid but the email isn't
             @williams.edu.
     """
-    # Read lazily (not at module import time) — main.py loads .env into
-    # os.environ *after* importing this module, so a module-level read
-    # would always see an empty value.
-    supabase_jwt_secret = os.environ.get("SUPABASE_JWT_SECRET")
-    if not supabase_jwt_secret:
-        # Fails loudly in any environment that forgot to set the secret,
-        # rather than silently accepting unverifiable tokens.
-        raise HTTPException(status_code=500, detail="Server auth is not configured.")
-
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or malformed Authorization header.")
 
     token = authorization.removeprefix("Bearer ").strip()
 
     try:
+        signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
         payload = jwt.decode(
             token,
-            supabase_jwt_secret,
-            algorithms=["HS256"],
+            signing_key.key,
+            algorithms=["ES256"],
             audience="authenticated",
         )
+    except jwt.PyJWKClientError:
+        raise HTTPException(status_code=401, detail="Could not verify token signature.")
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired session.")
 
