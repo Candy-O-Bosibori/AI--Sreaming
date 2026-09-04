@@ -16,7 +16,7 @@
 
 import os
 from typing import List
-from openai import OpenAI   # OpenAI's Python SDK — handles the API call for us
+from openai import AsyncOpenAI   # OpenAI's async Python SDK — handles the API call for us
 
 # Load .env file (same pattern used across the project)
 env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -30,14 +30,14 @@ if os.path.exists(env_path):
 
 # Create the OpenAI client.
 # It automatically reads OPENAI_API_KEY from the environment.
-client = OpenAI()
+client = AsyncOpenAI()
 
 # The model we're using to generate embeddings.
 # Defined once here so it's easy to swap out later.
 EMBEDDING_MODEL = "text-embedding-3-small"  # Outputs 1536-dimension vectors
 
 
-def embed_chunks(chunks: List[str]) -> List[List[float]]:
+async def embed_chunks(chunks: List[str]) -> List[List[float]]:
     """
     Take a list of text chunks and return a list of embedding vectors.
 
@@ -49,14 +49,14 @@ def embed_chunks(chunks: List[str]) -> List[List[float]]:
         Each vector is a list of 1536 floats.
 
     Example:
-        embed_chunks(["The ocean is deep", "Fish live underwater"])
+        await embed_chunks(["The ocean is deep", "Fish live underwater"])
         → [[0.02, -0.14, ...], [0.05, -0.11, ...]]
     """
 
     # Send all chunks to OpenAI in a single API call.
     # The embeddings endpoint accepts a list — more efficient than
     # calling it once per chunk (fewer API round-trips, lower latency).
-    response = client.embeddings.create(
+    response = await client.embeddings.create(
         model=EMBEDDING_MODEL,
         input=chunks,   # Pass the whole list at once
     )

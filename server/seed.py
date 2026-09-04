@@ -8,10 +8,12 @@
 #   python seed.py
 # ============================================================
 
+import asyncio
+
 from chunker import chunk_text
 from embedder import embed_chunks
 from store import store_chunks, create_document
-from db import get_conn
+from db import close_pool, get_pool, open_pool
 
 # ── Document 1: fake AI research paper ───────────────────────────────
 DOC1_TEXT = """
@@ -63,75 +65,77 @@ in their muscles which stores oxygen.
 """
 
 
-def seed():
-    print("=" * 55)
-    print("Clearing existing data...")
-    conn = get_conn()
-    cur = conn.cursor()
-    # documents must be deleted before documents_meta (FK constraint)
-    cur.execute("DELETE FROM documents")
-    cur.execute("DELETE FROM documents_meta")
-    conn.commit()
-    conn.close()
+async def seed():
+    await open_pool()
+    try:
+        print("=" * 55)
+        print("Clearing existing data...")
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                # documents must be deleted before documents_meta (FK constraint)
+                await cur.execute("DELETE FROM documents")
+                await cur.execute("DELETE FROM documents_meta")
 
-    # ── Seed document 1 ───────────────────────────────────────────────
-    print("\nSeeding Document 1: NeuroSearch-7 paper")
-    doc1_id = create_document("neurosearch_paper.txt")
-    print(f"  doc_id = {doc1_id}")
+        # ── Seed document 1 ───────────────────────────────────────────
+        print("\nSeeding Document 1: NeuroSearch-7 paper")
+        doc1_id = await create_document("neurosearch_paper.txt")
+        print(f"  doc_id = {doc1_id}")
 
-    chunks1 = chunk_text(DOC1_TEXT, chunk_size=500, overlap=50)
-    vectors1 = embed_chunks(chunks1)
-    store_chunks(chunks1, vectors1, doc1_id)
+        chunks1 = chunk_text(DOC1_TEXT, chunk_size=500, overlap=50)
+        vectors1 = await embed_chunks(chunks1)
+        await store_chunks(chunks1, vectors1, doc1_id)
 
-    # ── Seed document 2 ───────────────────────────────────────────────
-    print("\nSeeding Document 2: Marine biology facts")
-    doc2_id = create_document("ocean_facts.txt")
-    print(f"  doc_id = {doc2_id}")
+        # ── Seed document 2 ───────────────────────────────────────────
+        print("\nSeeding Document 2: Marine biology facts")
+        doc2_id = await create_document("ocean_facts.txt")
+        print(f"  doc_id = {doc2_id}")
 
-    chunks2 = chunk_text(DOC2_TEXT, chunk_size=500, overlap=50)
-    vectors2 = embed_chunks(chunks2)
-    store_chunks(chunks2, vectors2, doc2_id)
+        chunks2 = chunk_text(DOC2_TEXT, chunk_size=500, overlap=50)
+        vectors2 = await embed_chunks(chunks2)
+        await store_chunks(chunks2, vectors2, doc2_id)
 
-    # ── Isolation tests ───────────────────────────────────────────────
-    print("\n" + "=" * 55)
-    print("ISOLATION TESTS")
-    print("=" * 55)
+        # ── Isolation tests ───────────────────────────────────────────
+        print("\n" + "=" * 55)
+        print("ISOLATION TESTS")
+        print("=" * 55)
 
-    from query import query_similar
+        from query import query_similar
 
-    # Test 1: ask a doc1 question scoped to doc1 → should get results
-    print(f"\nTest 1 — NeuroSearch question, scoped to doc_id={doc1_id}:")
-    results = query_similar("What was the retrieval accuracy of NeuroSearch-7?", top_k=2, doc_id=doc1_id)
-    for r in results:
-        print(f"  ✓ {r[:80]}")
-    assert len(results) > 0, "FAIL: expected results from doc1"
-
-    # Test 2: ask a doc2 question scoped to doc2 → should get results
-    print(f"\nTest 2 — Ocean question, scoped to doc_id={doc2_id}:")
-    results = query_similar("How deep is the Mariana Trench?", top_k=2, doc_id=doc2_id)
-    for r in results:
-        print(f"  ✓ {r[:80]}")
-    assert len(results) > 0, "FAIL: expected results from doc2"
-
-    # Test 3: ask a doc1 question but scoped to doc2 → must return ONLY doc2 chunks.
-    # Cosine similarity always returns the closest match within the filtered set,
-    # so results won't be empty — but they must not contain NeuroSearch-7 content.
-    print(f"\nTest 3 — NeuroSearch question, scoped to doc_id={doc2_id} (cross-query):")
-    results = query_similar("What was the retrieval accuracy of NeuroSearch-7?", top_k=2, doc_id=doc2_id)
-    leaked = [r for r in results if "NeuroSearch" in r or "94.3" in r or "reranking" in r]
-    if leaked:
-        print(f"  ✗ FAIL: doc1 content leaked into doc2 results:")
-        for r in leaked:
-            print(f"    {r[:80]}")
-    else:
-        print(f"  ✓ Returned {len(results)} doc2 chunk(s) — no doc1 content leaked:")
+        # Test 1: ask a doc1 question scoped to doc1 → should get results
+        print(f"\nTest 1 — NeuroSearch question, scoped to doc_id={doc1_id}:")
+        results = await query_similar("What was the retrieval accuracy of NeuroSearch-7?", top_k=2, doc_id=doc1_id)
         for r in results:
-            print(f"    {r[:80]}")
+            print(f"  ✓ {r[:80]}")
+        assert len(results) > 0, "FAIL: expected results from doc1"
 
-    print("\n" + "=" * 55)
-    print("All tests passed. Phase 2 verified.")
-    print("=" * 55)
+        # Test 2: ask a doc2 question scoped to doc2 → should get results
+        print(f"\nTest 2 — Ocean question, scoped to doc_id={doc2_id}:")
+        results = await query_similar("How deep is the Mariana Trench?", top_k=2, doc_id=doc2_id)
+        for r in results:
+            print(f"  ✓ {r[:80]}")
+        assert len(results) > 0, "FAIL: expected results from doc2"
+
+        # Test 3: ask a doc1 question but scoped to doc2 → must return ONLY doc2 chunks.
+        # Cosine similarity always returns the closest match within the filtered set,
+        # so results won't be empty — but they must not contain NeuroSearch-7 content.
+        print(f"\nTest 3 — NeuroSearch question, scoped to doc_id={doc2_id} (cross-query):")
+        results = await query_similar("What was the retrieval accuracy of NeuroSearch-7?", top_k=2, doc_id=doc2_id)
+        leaked = [r for r in results if "NeuroSearch" in r or "94.3" in r or "reranking" in r]
+        if leaked:
+            print(f"  ✗ FAIL: doc1 content leaked into doc2 results:")
+            for r in leaked:
+                print(f"    {r[:80]}")
+        else:
+            print(f"  ✓ Returned {len(results)} doc2 chunk(s) — no doc1 content leaked:")
+            for r in results:
+                print(f"    {r[:80]}")
+
+        print("\n" + "=" * 55)
+        print("All tests passed. Phase 2 verified.")
+        print("=" * 55)
+    finally:
+        await close_pool()
 
 
 if __name__ == "__main__":
-    seed()
+    asyncio.run(seed())

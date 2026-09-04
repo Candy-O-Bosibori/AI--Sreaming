@@ -10,6 +10,8 @@ import auth as auth_module
 from auth import REQUIRED_EMAIL_DOMAIN, get_current_user
 from main import app
 
+from ._client import make_client
+
 # A real EC key pair, generated once for the whole test run. This never
 # touches Supabase or the network — it's used to sign fake tokens the
 # same way Supabase's real ES256 keys would, and to stand in for the
@@ -50,7 +52,7 @@ def _fake_current_user():
 # without needing a live Supabase JWT. Auth-specific tests below temporarily
 # remove this override to hit the real get_current_user() dependency.
 app.dependency_overrides[get_current_user] = _fake_current_user
-client = TestClient(app)
+client = make_client()
 
 
 # ── Auth-gating tests (real auth.py runs, no dependency override) ─────

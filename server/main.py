@@ -4,6 +4,7 @@
 
 import os
 import re
+from contextlib import asynccontextmanager
 
 import anthropic
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -13,7 +14,7 @@ from pydantic import BaseModel
 
 from auth import get_current_user
 from chunker import chunk_smart
-from db import get_conn
+from db import close_pool, get_pool, open_pool
 from embedder import embed_chunks
 from history import get_history, save_message, touch_document
 from parse_pdf import parse_pdf
@@ -41,7 +42,18 @@ if os.path.exists(env_path):
 client = anthropic.AsyncAnthropic()
 
 
-app = FastAPI()
+# ── Lifespan — open/close the async DB connection pool with the app ───
+# The pool is created once here (not per-request) and shared across
+# every route, so requests borrow-and-return a connection instead of
+# opening a brand-new one each time. See db.py for the pool itself.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await open_pool()
+    yield
+    await close_pool()
+
+
+app = FastAPI(lifespan=lifespan)
 
 ALLOWED_ORIGINS = [
     "http://localhost:5173",                          # local dev
@@ -65,9 +77,9 @@ class ChatRequest(BaseModel):
 
 # ── Streaming generator for /chat ─────────────────────────────────────
 async def stream_chat(message: str, doc_id: int, user_id: str, debate_mode: bool = False):
-    touch_document(doc_id)
-    history = get_history(doc_id, user_id, limit=6)
-    chunks = query_similar(message, top_k=12, doc_id=doc_id)
+    await touch_document(doc_id)
+    history = await get_history(doc_id, user_id, limit=6)
+    chunks = await query_similar(message, top_k=12, doc_id=doc_id)
     context = "\n\n".join(chunks)
 
     system_prompt = SYSTEM_PROMPT_DEBATE if debate_mode else SYSTEM_PROMPT_DEFAULT
@@ -84,14 +96,21 @@ async def stream_chat(message: str, doc_id: int, user_id: str, debate_mode: bool
             full_reply.append(text)
             yield f"data: {text}\n\n"
 
-    save_message(doc_id, user_id, "user", message)
-    save_message(doc_id, user_id, "assistant", "".join(full_reply))
+    await save_message(doc_id, user_id, "user", message)
+    await save_message(doc_id, user_id, "assistant", "".join(full_reply))
     yield "data: [DONE]\n\n"
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────
 # Every route below requires a valid @williams.edu Supabase session
 # (see auth.py) — there is no anonymous/public use of this API.
+#
+# Every route is `async def`, and every call inside genuinely `await`s —
+# the DB pool (db.py) and OpenAI client (embedder.py) are both real async
+# clients now, not blocking calls hidden inside an async-labeled function.
+# A route with no I/O of its own (there are none left here) could stay
+# plain `def`, but keeping all routes async is simpler to reason about
+# once nothing inside blocks the event loop.
 
 @app.post("/chat")
 async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
@@ -104,28 +123,25 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
 
 @app.get("/history")
 async def history(doc_id: int, user: dict = Depends(get_current_user)):
-    return get_history(doc_id, user["id"])
+    return await get_history(doc_id, user["id"])
 
 
 @app.get("/documents")
-def list_documents(user: dict = Depends(get_current_user)):
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT dm.id, dm.filename, dm.created_at, COUNT(d.id) AS chunk_count
-            FROM documents_meta dm
-            LEFT JOIN documents d ON d.doc_id = dm.id
-            GROUP BY dm.id
-            ORDER BY dm.created_at DESC
-        """)
-        rows = cur.fetchall()
-        return [
-            {"id": r[0], "filename": r[1], "created_at": str(r[2]), "chunk_count": r[3]}
-            for r in rows
-        ]
-    finally:
-        conn.close()
+async def list_documents(user: dict = Depends(get_current_user)):
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("""
+                SELECT dm.id, dm.filename, dm.created_at, COUNT(d.id) AS chunk_count
+                FROM documents_meta dm
+                LEFT JOIN documents d ON d.doc_id = dm.id
+                GROUP BY dm.id
+                ORDER BY dm.created_at DESC
+            """)
+            rows = await cur.fetchall()
+            return [
+                {"id": r[0], "filename": r[1], "created_at": str(r[2]), "chunk_count": r[3]}
+                for r in rows
+            ]
 
 
 @app.post("/upload")
@@ -134,13 +150,10 @@ async def upload(file: UploadFile = File(...), user: dict = Depends(get_current_
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
     # Duplicate check — same filename already in the library
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM documents_meta WHERE filename = %s", (file.filename,))
-        existing = cur.fetchone()
-    finally:
-        conn.close()
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT id FROM documents_meta WHERE filename = %s", (file.filename,))
+            existing = await cur.fetchone()
     if existing:
         raise HTTPException(
             status_code=409,
@@ -156,37 +169,30 @@ async def upload(file: UploadFile = File(...), user: dict = Depends(get_current_
     if not text.strip():
         raise HTTPException(status_code=422, detail="No extractable text found in PDF.")
 
-    doc_id = create_document(file.filename)
+    doc_id = await create_document(file.filename)
     chunks = chunk_smart(text, chunk_size=500, overlap=50)
-    vectors = embed_chunks(chunks)
-    store_chunks(chunks, vectors, doc_id)
+    vectors = await embed_chunks(chunks)
+    await store_chunks(chunks, vectors, doc_id)
 
     return {"doc_id": doc_id, "chunk_count": len(chunks), "status": "ready"}
 
 
 @app.delete("/documents/{doc_id}")
-def delete_document(doc_id: int, user: dict = Depends(get_current_user)):
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM messages WHERE doc_id = %s", (doc_id,))
-        cur.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,))
-        cur.execute("DELETE FROM documents_meta WHERE id = %s", (doc_id,))
-        conn.commit()
-        return {"status": "deleted"}
-    finally:
-        conn.close()
+async def delete_document(doc_id: int, user: dict = Depends(get_current_user)):
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM messages WHERE doc_id = %s", (doc_id,))
+            await cur.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,))
+            await cur.execute("DELETE FROM documents_meta WHERE id = %s", (doc_id,))
+            return {"status": "deleted"}
 
 
-def _require_document_exists(doc_id: int) -> None:
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM documents_meta WHERE id = %s", (doc_id,))
-        if cur.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Document not found.")
-    finally:
-        conn.close()
+async def _require_document_exists(doc_id: int) -> None:
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT 1 FROM documents_meta WHERE id = %s", (doc_id,))
+            if (await cur.fetchone()) is None:
+                raise HTTPException(status_code=404, detail="Document not found.")
 
 
 # Splits Claude's numbered-list output ("1. Question one\n2. Question two")
@@ -214,8 +220,8 @@ def _parse_numbered_list(text: str) -> list[str]:
 
 @app.post("/documents/{doc_id}/summary")
 async def summarize_document(doc_id: int, user: dict = Depends(get_current_user)):
-    _require_document_exists(doc_id)
-    chunks = get_all_chunks(doc_id, limit=40)
+    await _require_document_exists(doc_id)
+    chunks = await get_all_chunks(doc_id, limit=40)
     if not chunks:
         raise HTTPException(status_code=422, detail="Document has no content to summarize.")
     context = "\n\n".join(chunks)
@@ -231,8 +237,8 @@ async def summarize_document(doc_id: int, user: dict = Depends(get_current_user)
 
 @app.post("/documents/{doc_id}/discussion-questions")
 async def generate_discussion_questions(doc_id: int, user: dict = Depends(get_current_user)):
-    _require_document_exists(doc_id)
-    chunks = get_all_chunks(doc_id, limit=40)
+    await _require_document_exists(doc_id)
+    chunks = await get_all_chunks(doc_id, limit=40)
     if not chunks:
         raise HTTPException(status_code=422, detail="Document has no content to generate questions from.")
     context = "\n\n".join(chunks)

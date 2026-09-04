@@ -9,10 +9,10 @@
 
 from typing import List, Optional
 from embedder import embed_chunks
-from db import get_conn
+from db import get_pool
 
 
-def query_similar(question: str, top_k: int = 5, doc_id: Optional[int] = None) -> List[str]:
+async def query_similar(question: str, top_k: int = 5, doc_id: Optional[int] = None) -> List[str]:
     """
     Find the top_k most relevant text chunks for a given question.
 
@@ -29,49 +29,43 @@ def query_similar(question: str, top_k: int = 5, doc_id: Optional[int] = None) -
     # Embed the question into a 1536-dim vector.
     # We pass it as a list because embed_chunks() expects a list;
     # [0] pulls the single vector back out.
-    question_vector = embed_chunks([question])[0]
+    question_vector = (await embed_chunks([question]))[0]
     vector_str = str(question_vector)
 
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            if doc_id is not None:
+                # Scoped search: only return chunks that belong to this document.
+                # The WHERE clause filters rows BEFORE the cosine distance is ranked,
+                # so we never compare against chunks from other documents.
+                await cur.execute(
+                    """
+                    SELECT content
+                    FROM documents
+                    WHERE doc_id = %s
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (doc_id, vector_str, top_k),
+                )
+            else:
+                # Unscoped search: compare against every chunk in the database.
+                await cur.execute(
+                    """
+                    SELECT content
+                    FROM documents
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (vector_str, top_k),
+                )
 
-        if doc_id is not None:
-            # Scoped search: only return chunks that belong to this document.
-            # The WHERE clause filters rows BEFORE the cosine distance is ranked,
-            # so we never compare against chunks from other documents.
-            cur.execute(
-                """
-                SELECT content
-                FROM documents
-                WHERE doc_id = %s
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (doc_id, vector_str, top_k),
-            )
-        else:
-            # Unscoped search: compare against every chunk in the database.
-            cur.execute(
-                """
-                SELECT content
-                FROM documents
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (vector_str, top_k),
-            )
-
-        # fetchall() returns [("chunk text",), ...] — row[0] extracts the string.
-        results = [row[0] for row in cur.fetchall()]
-
-    finally:
-        conn.close()
-
-    return results
+            # fetchall() returns [("chunk text",), ...] — row[0] extracts the string.
+            rows = await cur.fetchall()
+            return [row[0] for row in rows]
 
 
-def get_all_chunks(doc_id: int, limit: int = 40) -> List[str]:
+async def get_all_chunks(doc_id: int, limit: int = 40) -> List[str]:
     """
     Fetch up to `limit` chunks for a document, in original document order
     — not ranked by similarity to any question. Used for tasks that need
@@ -97,27 +91,30 @@ def get_all_chunks(doc_id: int, limit: int = 40) -> List[str]:
         originally stored (which matches document reading order — see
         store.py's store_chunks()).
     """
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT content FROM documents WHERE doc_id = %s ORDER BY id LIMIT %s",
-            (doc_id, limit),
-        )
-        return [row[0] for row in cur.fetchall()]
-    finally:
-        conn.close()
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT content FROM documents WHERE doc_id = %s ORDER BY id LIMIT %s",
+                (doc_id, limit),
+            )
+            rows = await cur.fetchall()
+            return [row[0] for row in rows]
 
 
 # ── Quick test ────────────────────────────────────────────────────────
 # Run this file directly to test: python query.py
 if __name__ == "__main__":
-    question = "What was the retrieval accuracy of NeuroSearch-7?"
-    print(f"Question: {question}\n")
+    import asyncio
 
-    chunks = query_similar(question, top_k=3)
-    print(f"Top {len(chunks)} relevant chunks (all docs):\n")
-    for i, chunk in enumerate(chunks, 1):
-        print(f"--- Chunk {i} ---")
-        print(chunk)
-        print()
+    async def _main():
+        question = "What was the retrieval accuracy of NeuroSearch-7?"
+        print(f"Question: {question}\n")
+
+        chunks = await query_similar(question, top_k=3)
+        print(f"Top {len(chunks)} relevant chunks (all docs):\n")
+        for i, chunk in enumerate(chunks, 1):
+            print(f"--- Chunk {i} ---")
+            print(chunk)
+            print()
+
+    asyncio.run(_main())

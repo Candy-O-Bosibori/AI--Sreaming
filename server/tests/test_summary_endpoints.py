@@ -1,12 +1,13 @@
 import pytest
-from fastapi.testclient import TestClient
 
 from auth import get_current_user
 from main import _parse_numbered_list, app
 
+from ._client import make_client
+
 FAKE_USER = {"id": "00000000-0000-0000-0000-000000000001", "email": "student@williams.edu"}
 app.dependency_overrides[get_current_user] = lambda: FAKE_USER
-client = TestClient(app)
+client = make_client()
 
 
 # ── _parse_numbered_list — verified against real Claude output ────────

@@ -9,11 +9,10 @@
 # that doc_id into store_chunks().
 # ============================================================
 
-import psycopg2.extras
-from db import get_conn
+from db import get_pool
 
 
-def create_document(filename: str) -> int:
+async def create_document(filename: str) -> int:
     """
     Register a new document in documents_meta and return its ID.
 
@@ -27,23 +26,19 @@ def create_document(filename: str) -> int:
     Returns:
         The new document's integer ID.
     """
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        # RETURNING id tells PostgreSQL to give back the new row's id
-        # immediately after the INSERT, without needing a second query.
-        cur.execute(
-            "INSERT INTO documents_meta (filename) VALUES (%s) RETURNING id",
-            (filename,),
-        )
-        doc_id = cur.fetchone()[0]
-        conn.commit()
-        return doc_id
-    finally:
-        conn.close()
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            # RETURNING id tells PostgreSQL to give back the new row's id
+            # immediately after the INSERT, without needing a second query.
+            await cur.execute(
+                "INSERT INTO documents_meta (filename) VALUES (%s) RETURNING id",
+                (filename,),
+            )
+            row = await cur.fetchone()
+            return row[0]
 
 
-def store_chunks(chunks: list[str], vectors: list[list[float]], doc_id: int) -> None:
+async def store_chunks(chunks: list[str], vectors: list[list[float]], doc_id: int) -> None:
     """
     Insert a list of text chunks and their vectors into the database,
     all linked to the given document ID.
@@ -56,24 +51,16 @@ def store_chunks(chunks: list[str], vectors: list[list[float]], doc_id: int) -> 
                  chunk back to its source document.
 
     Example:
-        doc_id = create_document("paper.pdf")
-        store_chunks(["chunk one", "chunk two"], [vec1, vec2], doc_id)
+        doc_id = await create_document("paper.pdf")
+        await store_chunks(["chunk one", "chunk two"], [vec1, vec2], doc_id)
     """
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-
-        # INSERT all rows in one SQL call — one round-trip instead of N.
-        # Template has three slots: content, embedding::vector, doc_id.
-        psycopg2.extras.execute_values(
-            cur,
-            "INSERT INTO documents (content, embedding, doc_id) VALUES %s",
-            [(chunk, str(vector), doc_id) for chunk, vector in zip(chunks, vectors)],
-            template="(%s, %s::vector, %s)",
-        )
-
-        conn.commit()
-        print(f"Stored {len(chunks)} chunks for doc_id={doc_id}.")
-
-    finally:
-        conn.close()
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            # executemany pipelines all rows in one round-trip-efficient batch
+            # (psycopg v3's async pipeline mode), rather than one INSERT per
+            # chunk waited on individually.
+            await cur.executemany(
+                "INSERT INTO documents (content, embedding, doc_id) VALUES (%s, %s::vector, %s)",
+                [(chunk, str(vector), doc_id) for chunk, vector in zip(chunks, vectors)],
+            )
+            print(f"Stored {len(chunks)} chunks for doc_id={doc_id}.")
